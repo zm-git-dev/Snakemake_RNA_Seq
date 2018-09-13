@@ -1,72 +1,134 @@
-configfile: "config.yaml"
+# Snakemake file for RNA-seq analysis
 
-# fetch URL to transcriptome multi fasta from configfile
-genome_URL = config["refs"]["genome_URL"]
-transcriptome_URL = config["refs"]["transcriptome_URL"]
-# create lists containing samplenames, conditions, path/filenames of the fw-reads(R1)
-# and the path/filenames of the rev reads(R2) from the file: data/sampls.txt
+
+###############
+# Libraries
+###############
+
+import os
 import pandas as pd
-samples = list(pd.read_table("data/samples.txt")["sample"])
-conditions = list(pd.read_table("data/samples.txt")["condition"])
-R1 = list(pd.read_table("data/samples.txt")["fq1"])
-R2 = list(pd.read_table("data/samples.txt")["fq2"])
+from snakemake.utils import validate, min_version
+
+#############################################
+# Configuration and sample sheets
+#############################################
+
+configfile: "configs/configs.yaml"
+WORKING_DIR         = config["working_dir"]    # where you want to store your intermediate files (this directory will be cleaned up at the end)
+RESULT_DIR          = config["result_dir"]      # what you want to keep
+# fetch URL to transcriptome multi fasta from configfile
+genome_URL = config["refs"]["genome"]
+transcriptome_URL = config["refs"]["transcriptome"]
+
+###############
+# Helper Functions
+###############
+def get_fastq(wildcards):
+    return units.loc[(wildcards.sample), ["fq1", "fq2"]].dropna()
+
+def get_samples_per_treatment(input_df="units.tsv",colsamples="sample",coltreatment="condition",treatment="control"):
+    """This function returns a list of samples that correspond to the same experimental condition"""
+    df = pd.read_table(input_df)
+    df = df.loc[df[coltreatment] == treatment]
+    filtered_samples = df[colsamples].tolist()
+    return filtered_samples
+
+##############
+# Samples and conditions
+##############
+
+units = pd.read_table(config["units"], dtype=str).set_index(["sample"], drop=False)
+
+SAMPLES = units.index.get_level_values('sample').unique().tolist()
+
+CASES = get_samples_per_treatment(treatment="treatment")
+CONTROLS = get_samples_per_treatment(treatment="control")
+
+##############
+# Wildcards
+##############
+wildcard_constraints:
+    sample = "[A-Za-z0-9]+"
+
+wildcard_constraints:
+    unit = "L[0-9]+"
+
+##############
+# Desired output
+##############
+
+FASTQC      =   expand(RESULT_DIR + "fastqc/{sample}_{pair}_fastqc.zip", sample=SAMPLES, pair={"forward", "reverse"})
+DIFF_EXP    =   RESULT_DIR + "result.csv"
+
+###############
+# Final output
+################
 
 rule all:
-    output:
-        "results/result.csv"
-        fwd = "fastqc/{samples}_forward_fastqc.zip",
-        rev = "fastqc/{samples}_reverse_fastqc.zip"
-    massage:
+    input:
+        FASTQC,
+        #DIFF_EXP
+    message:
         "Job done!"
+
+###############
+# Rules
+###############
 
 rule get_genome_fasta:
     output:
-        "genome/genome.fasta"
-    message:"downloading required genomic fasta file"
-    shell: "wget -O {output} {genome_URL}"
+        WORKING_DIR + "genome/genome.fasta"
+    message:
+        "downloading required genomic fasta file"
+    shell:
+        "wget -O {output} {genome_URL}"
 
 rule get_transcriptome_fasta:
     output:
-        "genome/ref_transcriptome.fasta"
-    message:"downloading required transcriptome fasta file"
-    shell: "wget -O {output} {transcriptome_URL}"
-
-rule get_ref_transcriptome_index:
-    input:
-        "genome/ref_transcriptome.fasta"
-    output:
-        ["genome/ref_transcriptome.fasta." + i for i in ("nhr", "nin", "nog", "nsd", "nsi", "nsd")]
-    conda:
-        "envs/blast.yaml"
+        WORKING_DIR + "genome/ref_transcriptome.fasta"
+    message:
+        "downloading required transcriptome fasta file"
     shell:
-        "makeblastdb -in {input} -dbtype prot"
+        "wget -O {output} {transcriptome_URL}"
+
+#rule get_ref_transcriptome_index:
+    #input:
+    #    WORKING_DIR + "genome/ref_transcriptome.fasta"
+    #output:
+    #    [WORKING_DIR + "genome/ref_transcriptome.fasta." + i for i in ("nhr", "nin", "nog", "nsd", "nsi", "nsd")]
+    #conda:
+#        "envs/blast.yaml"
+#    shell:
+#        "makeblastdb -in {input} -dbtype prot"
 
 rule index:
     input:
-        "genome/genome.fasta"
+        WORKING_DIR + "genome/genome.fasta"
     output:
-        ["genome/genome." + str(i) + ".bt2" for i in range(1,5)],
-        "genome/genome.rev.1.bt2",
-        "genome/genome.rev.2.bt2"
-    message:"indexing genome"
+        [WORKING_DIR + "genome/genome." + str(i) + ".ht2" for i in range(1,9)]
+    message:
+        "indexing genome with Hisat"
+
+    logs:
+
     params:
-        "genome/genome"
+        WORKING_DIR + "genome"
     threads: 10
-    shell:"bowtie2-build --threads {threads} {input} {params}"
+    shell:
+        "hisat2-build --quiet --threads {threads} {input} {params} 2>{log}"
 
 rule trimmomatic:
     input:
-        fq1 = R1,
-        fq2 = R2,
-        adapters = config["adapters"]
+        fastq           = get_fastq,
+        adapters        = config["adapters"]
     output:
-        fw_reads = "trimmed/{sample}_fw.fq.gz",
-        rev_reads = "trimmed/{sample}_rev.fq.gz",
-        forwardUnpaired = temp("trimmed/{sample}_forward_unpaired.fastq.gz"),
-        reverseUnpaired = temp("trimmed/{sample}_reverse_unpaired.fastq.gz")
+        fw_reads        = WORKING_DIR + "trimmed/{sample}_fw.fq.gz",
+        rev_reads       = WORKING_DIR + "trimmed/{sample}_rev.fq.gz",
+        forwardUnpaired = temp(WORKING_DIR + "trimmed/{sample}_forward_unpaired.fastq.gz"),
+        reverseUnpaired = temp(WORKING_DIR + "trimmed/{sample}_reverse_unpaired.fastq.gz")
     message: "trimming {wildcards.sample} reads"
     log:
-        RESULT_DIR + "logs/trimmomatic/{sample}_{unit}.log"
+        RESULT_DIR + "logs/trimmomatic/{sample}.log"
     params:
         seedMisMatches =            str(config['trimmomatic']['seedMisMatches']),
         palindromeClipTreshold =    str(config['trimmomatic']['palindromeClipTreshold']),
@@ -80,10 +142,10 @@ rule trimmomatic:
     threads: 10
     shell:
         "trimmomatic PE {params.phred} -threads {threads} "
-        "{input.reads} "
-        "{output.forward_reads} "
+        "{input.fastq} "
+        "{output.fw_reads} "
         "{output.forwardUnpaired} "
-        "{output.reverse_reads} "
+        "{output.rev_reads} "
         "{output.reverseUnpaired} "
         "ILLUMINACLIP:{input.adapters}:{params.seedMisMatches}:{params.palindromeClipTreshold}:{params.simpleClipThreshhold} "
         "LEADING:{params.LeadMinTrimQual} "
@@ -93,20 +155,24 @@ rule trimmomatic:
 
 rule fastqc:
     input:
-        fwd = "trimmed/{sample}_fw.fq.gz",
-        rev = "trimmed/{sample}_rev.fq.gz",
+        fwd = WORKING_DIR + "trimmed/{sample}_fw.fq.gz",
+        rev = WORKING_DIR + "trimmed/{sample}_rev.fq.gz",
     output:
-        fwd="fastqc/{samples}_forward_fastqc.zip",
-        rev="fastqc/{samples}_reverse_fastqc.zip"
+        fwd = RESULT_DIR + "fastqc/{sample}_forward_fastqc.zip",
+        rev = RESULT_DIR + "fastqc/{sample}_reverse_fastqc.zip"
     log:
-        "results/logs/fastqc/{samples}.fastqc.log"
+        "results/logs/fastqc/{sample}.fastqc.log"
     params:
         "results/fastqc/"
     message:
-        "Quality check of trimmed samples with FASTQC" 		#removed, it was not working
+        "Quality check of trimmed samples with FASTQC"
     shell:
         "fastqc --outdir={params} {input.fwd} {input.rev} 2>{log}"
-
+#########################################
+#########################################
+#### FROM HERE I DON'T KNOW KNOW IF IT RUNS
+#########################################
+#########################################
 rule hisat_mapping:
     input:
         fwd = "trimmed/{sample}_fw.fq.gz",

@@ -1,3 +1,10 @@
+
+units: units.tsv        #Complete the tab sep value file with the path to the files and their conditions
+
+### Definition of the path Snakemake has to create
+working_dir: "temp/"
+result_dir: "results/"
+
 refs:
     genome:
         ftp://ftp.solgenomics.net/genomes/Petunia_axillaris/assembly/Petunia_axillaris_v1.6.2_genome.fasta
