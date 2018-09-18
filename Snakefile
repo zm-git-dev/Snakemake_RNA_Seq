@@ -1,99 +1,69 @@
-# Snakemake file for ChIP-Seq PE analysis
+configfile: "configs/configs.yaml"
 
-###############
-# Libraries
-###############
-
-import os
+# fetch URL to transcriptome multi fasta from configfile
+genome_URL = config["refs"]["genome"]
+#transcriptome_fasta_URL = config["refs"]["transcriptomeFas"]
+transcriptome_gtf_URL = config["refs"]["transcriptomeGtf"]
+# create lists containing samplenames, conditions, path/filenames of the fw-reads(R1)
+# and the path/filenames of the rev reads(R2) from the file: data/sampls.txt
 import pandas as pd
-
-#############################################
-# Configuration and sample sheets
-#############################################
-
-configfile: "configs/config_sub.yaml"
-
-WORKING_DIR         = config["working_dir"]    # where you want to store your intermediate files (this directory will be cleaned up at the end)
-RESULT_DIR          = config["result_dir"]      # what you want to keep
-
-GENOME_FASTA_URL    = config["refs"]["genome_url"]
-GENOME_FASTA_FILE   = os.path.basename(config["refs"]["genome_url"])
-TOTALCORES          = 16                             #check this via 'grep -c processor /proc/cpuinfo'
-
-###############
-# Helper Functions
-###############
-def get_fastq(wildcards):
-    return units.loc[(wildcards.sample), ["fq1", "fq2"]].dropna()
-
-def get_samples_per_treatment(input_df="units.tsv",colsamples="sample",coltreatment="condition",treatment="control"):
-    """This function returns a list of samples that correspond to the same experimental condition"""
-    df = pd.read_table(input_df)
-    df = df.loc[df[coltreatment] == treatment]
-    filtered_samples = df[colsamples].tolist()
-    return filtered_samples
-
-##############
-# Samples and conditions
-##############
-
+SAMPLES = list(pd.read_table(config["units"])["sample"])
+#conditions = list(pd.read_table("data/samples.txt")["condition"])
+#R1 = list(pd.read_table("data/samples.txt")["fq1"])
+#R2 = list(pd.read_table("data/samples.txt")["fq2"])
 units = pd.read_table(config["units"], dtype=str).set_index(["sample"], drop=False)
+#SAMPLES = units.index.get_level_values('sample').unique().tolist()
 
-SAMPLES = units.index.get_level_values('sample').unique().tolist()
-
-CASES = get_samples_per_treatment(treatment="treatment")
-CONTROLS = get_samples_per_treatment(treatment="control")
-
-
-##############
-# Wildcards
-##############
-wildcard_constraints:
-    sample = "[A-Za-z0-9]+"
-
-wildcard_constraints:
-    unit = "L[0-9]+"
-
-##############
-# Desired output
-##############
-
-DIFF_EXP
-
-
-###############
-# Final output
-################
 rule all:
     input:
-        DIFF_EXP
-    message: "RNA-seq pipeline run was successful!"		#finger crossed to see this message!
-
-    shell:"#rm -rf {WORKING_DIR}"
-
-###############
-# Rules
-###############
+        countsTable = "results/counts.txt",
+        #resultsFile ="results/result.csv",
+        fwd = expand("results/fastqc/{sample}_fw_fastqc.zip", sample = SAMPLES),
+        rev = expand("results/fastqc/{sample}_rev_fastqc.zip", sample = SAMPLES)
+    message:
+        "Job done!"
 
 rule get_genome_fasta:
     output:
-        WORKING_DIR + "genome.fasta"
-    message:"downloading {GENOME_FASTA_FILE} genomic fasta file"
-    shell: "wget -O {output} {GENOME_FASTA_URL}"
+        "genome/genome.fasta"
+    message:"downloading required genomic fasta file"
+    shell: "wget -O {output} {genome_URL}"
+
+rule get_transcriptome_fasta:
+    output:
+        "genome/ref_transcriptome.fasta"
+    message:"downloading required transcriptome fasta file"
+    shell: "wget -O {output} {transcriptome_fasta_URL}"
+
+rule get_transcriptome_gtf:
+    output:
+        "genome/ref_transcriptome.gff"
+    message:"downloading required transcriptome gtf file"
+    shell: "wget -O {output} {transcriptome_gtf_URL}"
+
+rule get_ref_transcriptome_index:
+    input:
+        "genome/ref_transcriptome.fasta"
+    output:
+        ["genome/ref_transcriptome.fasta." + i for i in ("nhr", "nin", "nog", "nsd", "nsi")]
+    conda:
+        "envs/blast.yaml"
+    shell:
+        "makeblastdb -in {input} -dbtype prot"
 
 rule trimmomatic:
     input:
-        reads = get_fastq,
+        fq1 = "data/{SAMPLES}_R1.sub.fq",
+        fq2 = "data/{SAMPLES}_R2.sub.fq",
         adapters = config["adapters"]
     output:
-        forward_reads   = WORKING_DIR + "trimmed/{sample}_forward.fastq.gz",
-        reverse_reads   = WORKING_DIR + "trimmed/{sample}_reverse.fastq.gz",
-        forwardUnpaired = temp(WORKING_DIR + "trimmed/{sample}_forward_unpaired.fastq.gz"),
-        reverseUnpaired = temp(WORKING_DIR + "trimmed/{sample}_reverse_unpaired.fastq.gz")
-    message: "trimming {wildcards.sample} reads"
-    log:
-        RESULT_DIR + "logs/trimmomatic/{sample}.log"
-    params :
+        fw_reads = "trimmed/{SAMPLES}_fw.fq",
+        rev_reads = "trimmed/{SAMPLES}_rev.fq",
+        forwardUnpaired = "trimmed/{SAMPLES}_forward_unpaired.fastq",
+        reverseUnpaired = "trimmed/{SAMPLES}_reverse_unpaired.fastq"
+#    message: "trimming reads"
+#        "logs/trimmomatic/{SAMPLES}.log"
+    params:
         seedMisMatches =            str(config['trimmomatic']['seedMisMatches']),
         palindromeClipTreshold =    str(config['trimmomatic']['palindromeClipTreshold']),
         simpleClipThreshhold =      str(config['trimmomatic']['simpleClipThreshold']),
@@ -103,36 +73,89 @@ rule trimmomatic:
         avgMinQual =                str(config['trimmomatic']['avgMinQual']),
         minReadLen =                str(config['trimmomatic']['minReadLength']),
         phred = 		            str(config["trimmomatic"]["phred"])
-    threads: 10
-    conda:
-        "envs/trimmomatic_env.yaml"
+    threads: 1
     shell:
         "trimmomatic PE {params.phred} -threads {threads} "
-        "{input.reads} "
-        "{output.forward_reads} "
+        "{input.fq1} "
+        "{input.fq2} "
+        "{output.fw_reads} "
         "{output.forwardUnpaired} "
-        "{output.reverse_reads} "
+        "{output.rev_reads} "
         "{output.reverseUnpaired} "
         "ILLUMINACLIP:{input.adapters}:{params.seedMisMatches}:{params.palindromeClipTreshold}:{params.simpleClipThreshhold} "
         "LEADING:{params.LeadMinTrimQual} "
         "TRAILING:{params.TrailMinTrimQual} "
         "SLIDINGWINDOW:{params.windowSize}:{params.avgMinQual} "
-        "MINLEN:{params.minReadLen} 2>{log}"
+        "MINLEN:{params.minReadLen}" #" 2>{log}"
 
 rule fastqc:
     input:
-        fwd = WORKING_DIR + "trimmed/{sample}_forward.fastq.gz",
-        rev = WORKING_DIR + "trimmed/{sample}_reverse.fastq.gz"
+        fwd = "trimmed/{SAMPLES}_fw.fq",
+        rev = "trimmed/{SAMPLES}_rev.fq",
     output:
-        fwd = RESULT_DIR + "fastqc/{sample}_forward_fastqc.zip",
-        rev = RESULT_DIR + "fastqc/{sample}_reverse_fastqc.zip"
+        fwd="results/fastqc/{SAMPLES}_fw_fastqc.zip",
+        rev="results/fastqc/{SAMPLES}_rev_fastqc.zip"
     log:
-        RESULT_DIR + "logs/fastqc/{sample}.fastqc.log"
+        "results/logs/fastqc/{SAMPLES}.fastqc.log"
     params:
-        RESULT_DIR + "fastqc/"
+        "results/fastqc/"
     message:
-        "---Quality check of trimmed {wildcards.sample} sample with FASTQC"
-    conda:
-        "envs/fastqc_env.yaml"
+        "Quality check of trimmed samples with FASTQC" 		#removed, it was not working
     shell:
-        "fastqc --outdir={params} {input.fwd} {input.rev} 2>{log}"
+        "fastqc --outdir={params} {input.fwd} {input.rev}"
+
+rule index:
+    input:
+        "genome/genome.fasta"
+    output:
+        ["genome/genome." + str(i) + ".ht2" for i in range(1,9)]
+    message:"indexing genome"
+    params:
+        "genome/genome"
+    conda:
+        "envs/Hisat.yaml"
+    threads: 10
+    shell:"hisat2-build -p {threads} {input} {params}"
+
+rule hisat_mapping:
+    input:
+        fwd   = "trimmed/{SAMPLES}_fw.fq",
+        rev   = "trimmed/{SAMPLES}_rev.fq",
+        indexFiles = ["genome/genome." + str(i) + ".ht2" for i in range(1,9)]
+    output:
+        bams  = "mapped/{SAMPLES}.bam"
+    params:
+        indexName = "genome/genome"
+    message:
+        "mapping reads to genome to bam files."
+    conda:
+        "envs/hisat2.yaml"
+    threads: 10
+    shell:
+        "hisat2 -p {threads} --ignore-quals -x {params.indexName} -1 {input.fwd} -2 {input.rev} | samtools view -Sb -o {output.bams}"
+
+rule create_counts_table:
+    input:
+        bams = expand("mapped/{sample}.bam", sample=SAMPLES),
+        Tct  = "genome/ref_transcriptome.gff"
+    output:
+        "results/counts.txt"
+    #params:
+        # some parameters
+    conda:
+        "envs/subread.yaml"
+    shell:
+        "featureCounts -F 'gff' -a {input.Tct} -o {output} {input.bams}"
+
+rule DESeq2_analysis:
+    input:
+        counts    = "results/counts.txt",
+        #functions = "results/stringtie_transcriptome_blast.txt"
+    output:
+        "results/result.csv"
+    message:
+        "normalizing read counts en creating differential expression table"
+    conda:
+        "Deseq.yaml"
+    shell:
+        "Rscript Deseq.R {input.counts}"
